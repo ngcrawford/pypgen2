@@ -1,0 +1,3 @@
+[submodule "ngs_parsers"]
+	path = ngs_parsers
+	url = https://github.com/ngcrawford/ngs_parsers
