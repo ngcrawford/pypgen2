@@ -37,12 +37,17 @@ import itertools
 import numpy as np
 from subprocess import Popen, PIPE
 from collections import namedtuple
-from pypgen.parser import VCF
+from ngs_parsers import VCF
 
 
 def get_args():
     """Parse sys.argv"""
     parser = argparse.ArgumentParser()
+
+    parser.add_argument('-n', '-N', '--cores',
+                        required=True,
+                        type=int,
+                        help="Number of processor cores to use.")
 
     parser.add_argument('-r', '-R', '--region-file',
                         required=True,
@@ -101,6 +106,78 @@ def array2OnelinerAlignment(info, taxa, bases):
     return oneliner
 
 
+def process_snp_call(snp_call, ref, alt, IUPAC_ambiguities=False):
+    """Process VCF genotype fields.
+        The current version is very basic and
+        doesn't directly take into account the
+        quality of the call or call hets with
+        IUPAC ambiguity codes."""
+
+    # IUPAC ambiguity codes
+    IUPAC_dict = {('A', 'C'): 'M',
+                  ('A', 'G'): 'R',
+                  ('A', 'T'): 'W',
+                  ('C', 'G'): 'S',
+                  ('C', 'T'): 'Y',
+                  ('G', 'T'): 'K',
+                  ('A', 'C', 'G'): 'V',
+                  ('A', 'C', 'T'): 'H',
+                  ('A', 'G', 'T'): 'D',
+                  ('C', 'G', 'T'): 'B'}
+
+    #called_base = ""
+    snp_call = snp_call.split(":")
+
+    # process blanks
+    if snp_call[0] == "./.":
+        called_base = "-"
+
+    else:
+        allele1, allele2 = snp_call[0].split("/")
+
+        # process "0/0"
+        if allele1 == '0' and allele2 == '0':
+            called_base = ref
+
+        if allele1 == '1' and allele2 == '1':
+            called_base = alt
+
+        # process "0/N"
+        if allele1 == '0' and allele2 != '0':
+
+            if IUPAC_ambiguities == False:
+                called_base = 'N'
+
+            else:
+                call = [ref] + [alt.split(',')[int(allele2) - 1]]
+                call.sort()
+                call = tuple(call)
+                called_base = IUPAC_dict[call]
+
+        # process "2/2, 1/2, etc."
+        if int(allele1) >= 1 and int(allele2) > 1:
+
+            # deal with homozygotes
+            if allele1 == allele2:
+                called_base = alt.split(',')[int(allele1) - 1]
+
+            # deal with heterozygotes
+            else:
+
+                if IUPAC_ambiguities == False:
+                    called_base = 'N'
+
+                else:
+                    ref = alt.split(',')[int(allele1) - 1]
+                    alt = alt.split(',')[int(allele2) - 1]
+                    call = [ref, alt]
+                    call.sort()
+                    call = tuple(call)
+                    called_base = IUPAC_dict[call]
+
+    return called_base
+
+
 def callSNPs(current_base, numb_of_seqs):
     """Call the SNPs. Duh!"""
 
@@ -113,7 +190,8 @@ def callSNPs(current_base, numb_of_seqs):
         blanks.fill("-")
 
     for count, snp_call in enumerate(current_base[9:]):
-        base = VCF.process_snp_call(snp_call, current_base.REF, current_base.ALT)
+
+        base = process_snp_call(snp_call, current_base.REF, current_base.ALT)
         blanks[count] = base
 
     return blanks
@@ -129,26 +207,6 @@ def count_informative_sites(alignment_array):
     return informative_sites
 
 
-def get_subset_vcf(chrm, start, stop):
-    base_dir = "/Users/MullenLab/Desktop/Grad_Students/Nick/butterfly_practice"
-    cli = """java -Xmx6g -jar /Users/MullenLab/Source/gatk/dist/GenomeAnalysisTK.jar \
-      -R {3}/Butterfly.merge.scaffolds.fa  \
-      -T SelectVariants \
-      --variant {3}/32_butterflies_vcfs/32.butterflies.good_BGI_snps.combined.vcf \
-      -L {0}:{1}-{2}""".format(chrm, start, stop, base_dir)
-
-    cli_parts = shlex.split(cli)
-    vcf = Popen(cli_parts, stdin=PIPE, stderr=PIPE, stdout=PIPE).communicate()[0]
-    return vcf
-
-
-def generate_bootstraps(chrm, chrm_len, window_size, numb_of_reps):
-
-    start_sites = [random.randint(0, chrm_len-window_size) for item in range(numb_of_reps)]
-    replicates = []
-    for count, start in enumerate(start_sites):
-        vcf = get_subset_vcf(chrm, start, start+window_size)
-        yield vcf
 
 
 def parse_window_vcf(vcf, start, stop, window_size, chrm, fout):
@@ -313,18 +371,18 @@ def process_region(chrm, start, stop, position_data, samples_2_keep, args):
 
     #tempfile.tempdir = '/Users/testudines/Code/pypgen2'
     #phylip_file = tempfile.NamedTemporaryFile()
-    phylip_file = open('/Users/testudines/Code/pypgen2/test.phylip','w')
-    phylip_file.write(phylip)
-
     prefix = '{}_{}_{}'.format(chrm, start, stop)
+    phylip_file = open('/Users/testudines/Code/pypgen2/{}.phylip'.format(chrm), 'w')
+    phylip_file.write(phylip)
+    phylip_file.close()
+
     cli = "raxmlHPC-PTHREADS-SSE3 \
-        -T 4 \
+        -T {} \
         -s {} \
         -m GTRGAMMA \
         -p 12345 \
-        -n {}".format(phylip_file.name, prefix)
+        -n {}".format(args.cores, phylip_file.name, prefix)
 
-    phylip_file.close()
     raxml_args = shlex.split(cli)
     sbp = subprocess.Popen(raxml_args,
                            stdout=subprocess.PIPE,
@@ -337,6 +395,11 @@ def process_region(chrm, start, stop, position_data, samples_2_keep, args):
 
     for i in glob.glob('*.{}'.format(prefix)):
         os.remove(i)
+
+
+    os.remove('RAxML_flagCheck')
+    os.remove('Hmel221018.phylip')
+    os.remove('Hmel221018.phylip.reduced')
 
     tree_id =  oneliner.strip(";").split(':')[0]
     tree = '{} {}'.format(tree_id, tree)
@@ -355,25 +418,30 @@ def main():
 
     samples_2_keep = [i.strip() for i in args.samples_2_keep]
 
-    tree = []
+    fout = open(args.region_file.name.strip('.txt')+'_out.trees', 'w')
+
     for c, r in enumerate(args.region_file):
 
-        r =  r.strip()
-        chrm, start, stop =  re.split(r':|-', r)
+        if c > 3:
+            break
+
+        r = r.strip()
+
+        chrm, start, stop = re.split(r':|-', r)
+
+        #tree =  process_region(chrm, start, stop, position_data, samples_2_keep, args)
+
         try:
-            tree =  process_region(chrm, start, stop, position_data, samples_2_keep, args)
-            trees.append(tree)
+            tree = process_region(chrm, start, stop, position_data, samples_2_keep, args)
+
         except:
-            trees.append('bad_tree = {}:{}-{}'.format(chrm, start, stop))
+            tree = ('bad_tree = {}:{}-{}\n'.format(chrm, start, stop))
+
+        fout.write(tree)
+
 if __name__ == '__main__':
     main()
 
-
-
-""""
-raxmlHPC-PTHREADS-SSE3 -T 4 -s text.phylip -m GTRGAMMA -p 12345 -n text
-
-"""
 
 
 
